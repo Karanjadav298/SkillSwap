@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import Icon from "./components/Icon.jsx";
+import { supabase } from "./lib/supabase.js";
 import { CATEGORIES, LEVELS, METHODS, createId, normalizeSkillName } from "./data.js";
 import { clearSession, hashPassword, loadDatabase, loadSession, saveDatabase, saveSession } from "./storage.js";
 
@@ -88,7 +89,7 @@ function Modal({ title, children, onClose, wide = false }) {
 
 function App() {
   const [database, setDatabase] = useState(() => loadDatabase());
-  const [studentId, setStudentId] = useState(() => loadSession());
+  const [studentId, setStudentId] = useState(null);
   const [route, setRoute] = useState(currentRoute);
   const [notice, setNotice] = useState(null);
   const [authError, setAuthError] = useState("");
@@ -105,6 +106,34 @@ function App() {
   const student = database.profiles.find((profile) => profile.id === studentId) || null;
 
   useEffect(() => {
+     let mounted = true;
+
+  async function restoreSession() {
+    const { data, error } = await supabase.auth.getSession();
+
+    if (!mounted) return;
+
+    if (error) {
+      setAuthError(error.message);
+      return;
+    }
+
+    setStudentId(data.session?.user?.id ?? null);
+  }
+
+  restoreSession();
+
+  const {
+    data: { subscription },
+  } = supabase.auth.onAuthStateChange((_event, session) => {
+    setStudentId(session?.user?.id ?? null);
+  });
+
+  return () => {
+    mounted = false;
+    subscription.unsubscribe();
+  };
+}, []);
     function onHashChange() {
       const next = currentRoute();
       if (PRIVATE_ROUTES.has(next) && !studentId) {
@@ -172,80 +201,98 @@ function App() {
   }
 
   async function handleRegister(event) {
-    event.preventDefault();
-    setAuthError("");
-    setAuthBusy(true);
-    const form = new FormData(event.currentTarget);
-    const name = String(form.get("name") || "").trim();
-    const email = String(form.get("email") || "").trim().toLowerCase();
-    const password = String(form.get("password") || "");
-    const college = String(form.get("college") || "").trim();
-    const department = String(form.get("department") || "").trim();
-    const year = String(form.get("year") || "");
-    if (name.length < 2 || !email || password.length < 8 || !college || !department || !year) {
-      setAuthError("Complete each field. Passwords must be at least 8 characters.");
-      setAuthBusy(false);
-      return;
-    }
-    if (database.profiles.some((profile) => profile.email.toLowerCase() === email)) {
-      setAuthError("That email already has a profile. Try signing in instead.");
-      setAuthBusy(false);
-      return;
-    }
+  event.preventDefault();
+  setAuthError("");
+  setAuthBusy(true);
 
-    try {
-      const id = createId("student");
-      const salt = crypto.randomUUID();
-      const passwordHash = await hashPassword(password, salt);
-      const profile = {
-        id, name, email, college, department, year,
-        introduction: "",
-        contact: "Connect through a skill request",
-        joinedAt: new Date().toISOString(),
-      };
-      const next = {
-        ...database,
-        profiles: [...database.profiles, profile],
-        credentials: [...database.credentials, { studentId: id, email, salt, passwordHash }],
-      };
-      if (commit(next, `Welcome to SkillSwap, ${name.split(" ")[0]}.`)) {
-        saveSession(id);
-        setStudentId(id);
-        window.location.hash = "dashboard";
-        setRoute("dashboard");
-      }
-    } catch (error) {
-      setAuthError(error.message);
-    } finally {
-      setAuthBusy(false);
-    }
+  const form = new FormData(event.currentTarget);
+  const name = String(form.get("name") || "").trim();
+  const email = String(form.get("email") || "").trim().toLowerCase();
+  const password = String(form.get("password") || "");
+  const college = String(form.get("college") || "").trim();
+  const department = String(form.get("department") || "").trim();
+  const year = String(form.get("year") || "");
+
+  if (
+    name.length < 2 ||
+    !email ||
+    password.length < 8 ||
+    !college ||
+    !department ||
+    !year
+  ) {
+    setAuthError("Complete each field. Passwords must be at least 8 characters.");
+    setAuthBusy(false);
+    return;
   }
 
-  async function handleLogin(event) {
-    event.preventDefault();
-    setAuthError("");
-    setAuthBusy(true);
-    const form = new FormData(event.currentTarget);
-    const email = String(form.get("email") || "").trim().toLowerCase();
-    const password = String(form.get("password") || "");
-    try {
-      const credential = database.credentials.find((entry) => entry.email === email);
-      if (!credential || (await hashPassword(password, credential.salt)) !== credential.passwordHash) {
-        setAuthError("Email or password is incorrect.");
-        return;
-      }
-      saveSession(credential.studentId);
-      setStudentId(credential.studentId);
-      setNotice({ type: "success", text: "You’re signed in. Welcome back." });
+  try {
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: {
+          full_name: name,
+          college,
+          department,
+          year,
+        },
+      },
+    });
+
+    if (error) throw error;
+
+    if (data.session) {
+      setAuthError("");
+      setNotice({
+        type: "success",
+        text: `Welcome to SkillSwap, ${name.split(" ")[0]}!`,
+      });
+      saveSession(data.user.id);
+      setStudentId(data.user.id);
       window.location.hash = "dashboard";
       setRoute("dashboard");
-    } catch (error) {
-      setAuthError(error.message);
-    } finally {
-      setAuthBusy(false);
+    } else {
+      setAuthError("Registration successful! Please check your email and confirm your account before signing in.");
     }
+  } catch (error) {
+    setAuthError(error.message);
+  } finally {
+    setAuthBusy(false);
   }
+}
+ async function handleLogin(event) {
+  event.preventDefault();
+  setAuthError("");
+  setAuthBusy(true);
 
+  const form = new FormData(event.currentTarget);
+  const email = String(form.get("email") || "").trim().toLowerCase();
+  const password = String(form.get("password") || "");
+
+  try {
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (error) throw error;
+
+    saveSession(data.user.id);
+    setStudentId(data.user.id);
+    setNotice({ type: "success", text: "You’re signed in. Welcome back." });
+    window.location.hash = "dashboard";
+    setRoute("dashboard");
+  } catch (error) {
+    setAuthError(
+      error.message.includes("Email not confirmed")
+        ? "Please confirm your email before signing in."
+        : error.message
+    );
+  } finally {
+    setAuthBusy(false);
+  }
+}
   function enterDemo() {
     try {
       saveSession("student-1");
